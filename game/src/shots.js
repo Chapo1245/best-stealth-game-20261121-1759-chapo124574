@@ -1,113 +1,104 @@
-// Sleeper Car — staged screenshot scenes (?shot=1..4).
-// Each scene sets the exact same game state every time and renders one
-// fixed frame, so the screenshots are deterministic renders of this code.
-(function () {
-  'use strict';
-  var L = window.SC.level;
+// Coin & Candlelight: staged screenshots.
+// One file, one job: posing the game for its four pictures. Each shot sets
+// exact positions, suspicion and relics, then the game renders one frame —
+// so the same URL always produces the same pixels.
+import { makeNoiseRing } from './noise.js';
+import { makeCoinToss } from './coins.js';
 
-  function placeGuard(guard, col, row, dirDeg) {
-    var p = L.centerOf(col, row);
-    guard.x = p.x;
-    guard.y = p.y;
-    guard.dir = dirDeg * Math.PI / 180;
-    guard.state = 'patrol';
-    guard.stateTime = 0;
-    guard.pause = 99; // hold still for the shot
-    guard.suspicion = 0;
-    guard.mark = null;
-    guard.markTime = 0;
+function placeGuard(guard, x, y, facing, suspicion, state) {
+  guard.x = x;
+  guard.y = y;
+  guard.facing = facing;
+  guard.suspicion = suspicion;
+  guard.state = state;
+  guard.lastSeenX = x;
+  guard.lastSeenY = y;
+}
+
+export function stageShot(state, shot) {
+  const { world, player, guards } = state;
+  state.rings = [];
+  state.coins = [];
+  state.phase = 'play';
+  state.spottedCount = 0;
+  state.elapsedSeconds = 0;
+  for (const item of world.loot) item.taken = false;
+  player.lootTaken = 0;
+  player.coinsLeft = 3;
+
+  if (shot === 1) {
+    // Cover: the whole museum at a glance — Wren at the door, every guard
+    // mid-patrol, cones out, relics glinting, EXIT labelled at the far end.
+    player.x = 62;
+    player.y = 432;
+    player.facing = 0;
+    const facings = [0.5, 0.9, 0.4, 2.6, 1.9];
+    guards.forEach((guard, i) => {
+      const start = guard.waypoints[0];
+      placeGuard(guard, start[0], start[1], facings[i], 0, 'patrol');
+    });
+    return;
   }
 
-  function placePlayer(player, col, row, crouched) {
-    var p = L.centerOf(col, row);
-    player.x = p.x;
-    player.y = p.y;
-    player.crouched = !!crouched;
-    player.running = false;
-    player.moving = false;
-    player.rings = [];
-    player.clickTarget = null;
+  if (shot === 2) {
+    // Sneak: Wren flat behind a Marble Hall case, a coin she just tossed
+    // clinking on the marble while Patrol A's cone turns toward it. One
+    // relic already pocketed, two coins left.
+    world.loot[0].taken = true;
+    player.lootTaken = 1;
+    player.coinsLeft = 2;
+    player.x = 310;
+    player.y = 400;
+    player.facing = -0.9;
+    const coin = makeCoinToss({ x: 310, y: 400, facing: 0.4 }, world);
+    coin.x = coin.landX;
+    coin.y = coin.landY;
+    coin.landed = true;
+    coin.rang = true;
+    state.coins = [coin];
+    state.rings = [makeNoiseRing(coin.landX, coin.landY)];
+    state.rings[0].radius = 60;
+    placeGuard(guards[0], 360, 240, 0.9, 0.45, 'suspicious');
+    placeGuard(guards[1], 640, 130, 0.6, 0, 'patrol');
+    placeGuard(guards[2], 920, 110, 0.5, 0, 'patrol');
+    placeGuard(guards[3], 400, 400, -2.4, 0, 'patrol');
+    placeGuard(guards[4], 1180, 660, -2.4, 0, 'patrol');
+    return;
   }
 
-  // Shot 1: the whole carriage at the start — cones, cover, exit, objective.
-  function stageOverview(state) {
-    placePlayer(state.player, 1, 1, false);
-    placeGuard(state.guards[0], 4, 7, 0);
-    placeGuard(state.guards[1], 20, 7, 180);
-    placeGuard(state.guards[2], 11, 10, 270);
-    placeGuard(state.guards[3], 12, 4, 0);
-    state.banner = 'Steal the 3 ledger pages — then reach the EXIT unseen.';
-    state.bannerClass = '';
-    state.time = 1.2;
+  if (shot === 3) {
+    // Alarm: Rover E has Wren in a red cone by the Star Sapphire, rings
+    // still expanding from her last loud step. Two relics pocketed.
+    world.loot[0].taken = true;
+    world.loot[1].taken = true;
+    player.lootTaken = 2;
+    player.x = 1152;
+    player.y = 262;
+    player.facing = -2.2;
+    state.spottedCount = 1;
+    state.rings = [makeNoiseRing(1152, 262), makeNoiseRing(1152, 262)];
+    state.rings[0].radius = 120;
+    state.rings[1].radius = 60;
+    placeGuard(guards[0], 110, 280, 0.8, 0, 'patrol');
+    placeGuard(guards[1], 480, 600, -0.6, 0.2, 'patrol');
+    placeGuard(guards[2], 830, 640, 2.2, 0, 'patrol');
+    placeGuard(guards[3], 700, 420, -1.0, 0.1, 'patrol');
+    placeGuard(guards[4], 1078, 208, 0.5, 1, 'alarm');
+    return;
   }
 
-  // Shot 2: crouched in a dark luggage nook while a conductor's cone
-  // sweeps right past — the guard cannot see the hidden thief.
-  function stageHidden(state) {
-    placePlayer(state.player, 6, 1, true);
-    state.player.pages = 1;
-    state.pages[0].taken = true;
-    var g = state.guards[0];
-    placeGuard(g, 10, 4, 215);
-    g.suspicion = 35;
-    g.setMark('?', 99);
-    placeGuard(state.guards[1], 20, 10, 270);
-    placeGuard(state.guards[2], 16, 10, 0);
-    placeGuard(state.guards[3], 19, 7, 180);
-    state.banner = 'HIDDEN — crouched in cover, the lantern cone passes over you.';
-    state.bannerClass = 'good';
-    state.time = 2.4;
-  }
-
-  // Shot 3: running down the aisle — noise rings bloom and the Inspector
-  // turns toward the sound, suspicion climbing.
-  function stageNoise(state) {
-    placePlayer(state.player, 12, 7, false);
-    state.player.running = true;
-    state.player.rings = [
-      { x: state.player.x, y: state.player.y, r: 40, max: 200 },
-      { x: state.player.x, y: state.player.y, r: 110, max: 200 }
-    ];
-    var insp = state.guards[3];
-    placeGuard(insp, 17, 7, 180);
-    insp.suspicion = 68;
-    insp.state = 'investigate';
-    insp.setMark('?', 99);
-    placeGuard(state.guards[0], 4, 7, 0);
-    placeGuard(state.guards[1], 20, 10, 270);
-    placeGuard(state.guards[2], 11, 4, 90);
-    state.banner = 'HEARD SOMETHING! — running is loud. Walk, or hide.';
-    state.bannerClass = 'alarm';
-    state.time = 3.6;
-  }
-
-  // Shot 4: all three pages stolen — the rear door glows green, escape open.
-  function stageEscape(state) {
-    state.player.pages = 3;
-    for (var i = 0; i < state.pages.length; i++) state.pages[i].taken = true;
-    placePlayer(state.player, 19, 13, false);
-    placeGuard(state.guards[0], 3, 7, 0);
-    placeGuard(state.guards[1], 14, 7, 0);
-    placeGuard(state.guards[2], 11, 10, 270);
-    placeGuard(state.guards[3], 8, 4, 90);
-    state.banner = 'ALL PAGES STOLEN — the rear door is OPEN. Run for the EXIT!';
-    state.bannerClass = 'good';
-    state.time = 4.8;
-  }
-
-  var STAGES = { '1': stageOverview, '2': stageHidden, '3': stageNoise, '4': stageEscape };
-
-  function shotFromUrl() {
-    var m = /[?&]shot=([1-4])/.exec(window.location.search || '');
-    return m ? m[1] : null;
-  }
-
-  function applyShot(state) {
-    var n = shotFromUrl();
-    if (!n || !STAGES[n]) return false;
-    STAGES[n](state);
-    return true;
-  }
-
-  window.SC.shots = { shotFromUrl: shotFromUrl, applyShot: applyShot };
-})();
+  // Shot 4: escape — Wren at the EXIT with all three relics, banner up.
+  for (const item of world.loot) item.taken = true;
+  player.lootTaken = 3;
+  player.coinsLeft = 1;
+  player.x = 1212;
+  player.y = 432;
+  player.facing = 0;
+  state.phase = 'escaped';
+  state.elapsedSeconds = 81.5;
+  placeGuard(guards[0], 90, 110, 0.4, 0, 'patrol');
+  placeGuard(guards[1], 420, 640, -1.4, 0, 'patrol');
+  placeGuard(guards[2], 860, 180, 0.9, 0, 'patrol');
+  placeGuard(guards[3], 620, 460, 2.0, 0, 'patrol');
+  placeGuard(guards[4], 1040, 620, -2.0, 0, 'patrol');
+}

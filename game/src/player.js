@@ -1,116 +1,85 @@
-// Sleeper Car — the thief: movement, running noise, crouching, collecting.
-(function () {
-  'use strict';
-  var L = window.SC.level;
+// Coin & Candlelight: the thief, Wren.
+// One file, one job: moving the player. Walk is silent, run is fast and
+// loud; loot is picked up by walking over it; the exit only opens the
+// escape once every relic is taken. She carries three coins to throw.
+import {
+  COIN_COUNT,
+  PLAYER_NOISE_INTERVAL,
+  PLAYER_RADIUS,
+  PLAYER_RUN_SPEED,
+  PLAYER_WALK_SPEED,
+} from './config.js';
+import { circleHitsSolid, distance, pointInRect } from './world.js';
+import { makeNoiseRing } from './noise.js';
 
-  function Player() {
-    var s = L.centerOf(L.start.col, L.start.row);
-    this.x = s.x;
-    this.y = s.y;
-    this.r = 13;
-    this.crouched = false;
-    this.running = false;
-    this.moving = false;
-    this.stepPhase = 0;
-    this.noiseTimer = 0;
-    this.rings = []; // expanding footstep-noise rings {x, y, r, max}
-    this.clickTarget = null;
-    this.pages = 0;
-    this.facing = 0;
+export function makePlayer(start) {
+  return {
+    x: start.x,
+    y: start.y,
+    radius: PLAYER_RADIUS,
+    facing: 0,
+    moving: false,
+    running: false,
+    noiseTimer: 0,
+    lootTaken: 0,
+    coinsLeft: COIN_COUNT,
+    steps: 0,
+  };
+}
+
+function tryMove(world, player, dx, dy) {
+  const nx = player.x + dx;
+  const ny = player.y + dy;
+  if (!circleHitsSolid(world, nx, player.y, player.radius)) player.x = nx;
+  if (!circleHitsSolid(world, player.x, ny, player.radius)) player.y = ny;
+}
+
+// One fixed step. Returns a noise ring when the player runs, else null.
+export function updatePlayer(world, player, input, dt) {
+  let dx = 0;
+  let dy = 0;
+  if (input.left) dx -= 1;
+  if (input.right) dx += 1;
+  if (input.up) dy -= 1;
+  if (input.down) dy -= 1;
+  player.moving = dx !== 0 || dy !== 0;
+  player.running = player.moving && input.run;
+  if (player.moving) {
+    const len = Math.hypot(dx, dy);
+    const speed = player.running ? PLAYER_RUN_SPEED : PLAYER_WALK_SPEED;
+    player.facing = Math.atan2(dy, dx);
+    tryMove(world, player, (dx / len) * speed * dt, (dy / len) * speed * dt);
+    player.steps += speed * dt;
   }
-
-  Player.prototype.toggleCrouch = function () {
-    this.crouched = !this.crouched;
-    return this.crouched;
-  };
-
-  Player.prototype.tryMove = function (nx, ny) {
-    var r = this.r - 2;
-    var pts = [
-      [nx - r, ny - r], [nx + r, ny - r],
-      [nx - r, ny + r], [nx + r, ny + r]
-    ];
-    for (var i = 0; i < pts.length; i++) {
-      if (L.isSolid(Math.floor(pts[i][0] / L.TILE), Math.floor(pts[i][1] / L.TILE))) return false;
+  if (player.running) {
+    player.noiseTimer -= dt;
+    if (player.noiseTimer <= 0) {
+      player.noiseTimer = PLAYER_NOISE_INTERVAL;
+      return makeNoiseRing(player.x, player.y);
     }
-    return true;
-  };
+  } else {
+    player.noiseTimer = 0;
+  }
+  return null;
+}
 
-  Player.prototype.update = function (dt, keys, onNoise, onStep) {
-    var vx = 0;
-    var vy = 0;
-    if (keys['arrowup'] || keys['w']) vy -= 1;
-    if (keys['arrowdown'] || keys['s']) vy += 1;
-    if (keys['arrowleft'] || keys['a']) vx -= 1;
-    if (keys['arrowright'] || keys['d']) vx += 1;
-
-    if (vx === 0 && vy === 0 && this.clickTarget) {
-      var dx = this.clickTarget.x - this.x;
-      var dy = this.clickTarget.y - this.y;
-      var d = Math.sqrt(dx * dx + dy * dy);
-      if (d < 6) {
-        this.clickTarget = null;
-      } else {
-        vx = dx / d;
-        vy = dy / d;
-      }
+// Walk over a relic to pocket it. Returns the relic taken, or null.
+export function playerTakesLoot(world, player) {
+  for (const item of world.loot) {
+    if (item.taken) continue;
+    if (distance(player.x, player.y, item.x, item.y) < player.radius + 14) {
+      item.taken = true;
+      player.lootTaken += 1;
+      return item;
     }
+  }
+  return null;
+}
 
-    var len = Math.sqrt(vx * vx + vy * vy);
-    this.moving = len > 0;
-    if (this.moving) {
-      vx /= len;
-      vy /= len;
-      this.facing = Math.atan2(vy, vx);
-      var speed = this.crouched ? 70 : (keys['shift'] ? 230 : 140);
-      this.running = !!keys['shift'] && !this.crouched;
-      var nx = this.x + vx * speed * dt;
-      var ny = this.y + vy * speed * dt;
-      if (this.tryMove(nx, this.y)) this.x = nx;
-      if (this.tryMove(this.x, ny)) this.y = ny;
-      this.stepPhase += speed * dt;
-      if (this.stepPhase > 34) {
-        this.stepPhase = 0;
-        if (onStep) onStep(this.running);
-      }
-      if (this.running) {
-        this.noiseTimer -= dt;
-        if (this.noiseTimer <= 0) {
-          this.noiseTimer = 0.4;
-          this.rings.push({ x: this.x, y: this.y, r: 12, max: 200 });
-          if (onNoise) onNoise(this.x, this.y);
-        }
-      }
-    } else {
-      this.running = false;
-    }
+export function playerAtExit(world, player) {
+  return pointInRect(player.x, player.y, world.exitZone) && player.lootTaken >= world.loot.length;
+}
 
-    for (var i = this.rings.length - 1; i >= 0; i--) {
-      this.rings[i].r += 260 * dt;
-      if (this.rings[i].r > this.rings[i].max) this.rings.splice(i, 1);
-    }
-  };
-
-  Player.prototype.hiddenNow = function () {
-    var col = Math.floor(this.x / L.TILE);
-    var row = Math.floor(this.y / L.TILE);
-    return this.crouched && L.isCoverFloor(col, row);
-  };
-
-  Player.prototype.onPageTile = function (pages) {
-    var col = Math.floor(this.x / L.TILE);
-    var row = Math.floor(this.y / L.TILE);
-    for (var i = 0; i < pages.length; i++) {
-      if (!pages[i].taken && pages[i].col === col && pages[i].row === row) return pages[i];
-    }
-    return null;
-  };
-
-  Player.prototype.atExit = function () {
-    var col = Math.floor(this.x / L.TILE);
-    var row = Math.floor(this.y / L.TILE);
-    return col === L.exitTile.col && row === L.exitTile.row;
-  };
-
-  window.SC.player = { Player: Player };
-})();
+export function playerNearExit(world, player) {
+  return pointInRect(player.x, player.y, world.exitZone);
+}

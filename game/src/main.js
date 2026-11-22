@@ -1,237 +1,125 @@
-// Sleeper Car — game loop, input, win/lose, HUD. Keyboard + mouse,
-// one level, three ledger pages, one rear exit, four patrolling guards.
-(function () {
-  'use strict';
-  var L = window.SC.level;
-  var canvas = document.getElementById('game');
-  var ctx = canvas.getContext('2d');
-  var pagesEl = document.getElementById('pages');
-  var timerEl = document.getElementById('timer');
-  var bannerEl = document.getElementById('banner');
-  var fillEl = document.getElementById('suspicionFill');
-  var overlayEl = document.getElementById('overlay');
-  var overlayTitle = document.getElementById('overlayTitle');
-  var overlayText = document.getElementById('overlayText');
-  var overlayKeys = document.getElementById('overlayKeys');
+// Coin & Candlelight: the game loop — wire input, actors and drawing together.
+// One file, one job: running the game. Fixed 60 Hz steps keep play and
+// screenshots deterministic; the loop only renders what the state says.
+import { CANVAS_HEIGHT, CANVAS_WIDTH, GAME_SEED } from './config.js';
+import { makeSeededRandom } from './random.js';
+import { buildWorld } from './world.js';
+import { makeGuard, updateGuard, guardHearsNoise } from './guards.js';
+import { makePlayer, playerAtExit, playerTakesLoot, updatePlayer } from './player.js';
+import { makeInput, attachInput } from './input.js';
+import { drawScene } from './render.js';
+import { ringHeardBy, updateNoiseRing } from './noise.js';
+import { makeCoinToss, updateCoins } from './coins.js';
+import { stageShot } from './shots.js';
+import { makeSound } from './audio.js';
 
-  var TOTAL_PAGES = 3;
+const STEP = 1 / 60;
 
-  function newState() {
-    var pages = L.pages.map(function (p) {
-      return { col: p.col, row: p.row, taken: false };
-    });
-    return {
-      player: new window.SC.player.Player(),
-      guards: window.SC.guards.buildGuards(),
-      pages: pages,
-      time: 0,
-      status: 'playing', // playing | won | lost
-      alarm: false,
-      alarmTime: 0,
-      banner: 'Steal the 3 ledger pages — then reach the EXIT unseen.',
-      bannerClass: '',
-      startedAt: null
-    };
+function makeGameState() {
+  const random = makeSeededRandom(GAME_SEED);
+  const world = buildWorld();
+  return {
+    world,
+    player: makePlayer(world.playerStart),
+    guards: world.guardSpawns.map((spawn, i) => makeGuard(spawn, i, random)),
+    rings: [],
+    coins: [],
+    input: makeInput(),
+    phase: 'play', // play | caught | escaped
+    spottedCount: 0,
+    alarmActive: false,
+    elapsedSeconds: 0,
+    sound: makeSound(),
+  };
+}
+
+function hearRing(state, ring) {
+  const heard = ringHeardBy(ring, state.guards);
+  for (const guard of heard) guardHearsNoise(guard, ring.x, ring.y, ring.maxRadius);
+}
+
+function updateGame(state, dt) {
+  if (state.phase !== 'play') return;
+  state.elapsedSeconds += dt;
+  if (state.input.toss && state.player.coinsLeft > 0) {
+    state.coins.push(makeCoinToss(state.player, state.world));
+    state.player.coinsLeft -= 1;
   }
-
-  var state = newState();
-  var keys = {};
-  var maxSuspicion = 0;
-
-  function fmtTime(sec) {
-    var m = Math.floor(sec / 60);
-    var s = Math.floor(sec % 60);
-    return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+  state.input.toss = false;
+  const ring = updatePlayer(state.world, state.player, state.input, dt);
+  if (ring !== null) state.rings.push(ring);
+  const landedRings = updateCoins(state.coins, state.world, dt);
+  for (const landed of landedRings) {
+    state.rings.push(landed);
+    state.sound.clink();
   }
-
-  function showOverlay(title, text, keysHint) {
-    overlayTitle.textContent = title;
-    overlayText.textContent = text;
-    overlayKeys.textContent = keysHint;
-    overlayEl.classList.add('show');
-  }
-
-  function hideOverlay() {
-    overlayEl.classList.remove('show');
-  }
-
-  function raiseAlarm(guard) {
-    if (!state.alarm) {
-      state.alarm = true;
-      state.alarmTime = 0;
-      state.banner = 'SPOTTED! Break line of sight — hide in the dark nooks!';
-      state.bannerClass = 'alarm';
-      window.SC.audio.alarm();
-    }
-  }
-
-  function onNoise(x, y) {
-    for (var i = 0; i < state.guards.length; i++) {
-      if (state.guards[i].hearNoise(x, y)) {
-        state.banner = 'HEARD SOMETHING! — a guard is coming to look.';
-        state.bannerClass = 'alarm';
-        break;
-      }
-    }
-  }
-
-  function collectPage() {
-    var page = state.player.onPageTile(state.pages);
-    if (!page) return;
-    page.taken = true;
-    state.player.pages++;
-    window.SC.audio.page();
-    if (state.player.pages >= TOTAL_PAGES) {
-      state.banner = 'ALL PAGES STOLEN — the rear door is OPEN. Run for the EXIT!';
-      state.bannerClass = 'good';
+  for (let i = state.rings.length - 1; i >= 0; i--) {
+    const alive = updateNoiseRing(state.rings[i], dt);
+    if (alive) {
+      hearRing(state, state.rings[i]);
     } else {
-      state.banner = 'Page stolen (' + state.player.pages + ' / ' + TOTAL_PAGES + '). Stay out of the light.';
-      state.bannerClass = '';
+      state.rings.splice(i, 1);
     }
   }
-
-  function checkWinLose(dt) {
-    if (state.player.pages >= TOTAL_PAGES && state.player.atExit()) {
-      state.status = 'won';
-      window.SC.audio.win();
-      showOverlay('CLEAN GETAWAY',
-        'All 3 ledger pages stolen in ' + fmtTime(state.time) +
-        ' — you slipped out the rear door and the train never knew you were there.',
-        'Press R to run it again, faster and quieter.');
+  const taken = playerTakesLoot(state.world, state.player);
+  if (taken !== null) state.sound.pickup();
+  const alarmed = state.guards.some((g) => g.state === 'alarm');
+  if (alarmed && !state.alarmActive) {
+    state.spottedCount += 1;
+    state.sound.alarm();
+  }
+  state.alarmActive = alarmed;
+  for (const guard of state.guards) {
+    const result = updateGuard(state.world, guard, state.player, dt);
+    if (result === 'caught') {
+      state.phase = 'caught';
+      state.sound.caught();
       return;
     }
-    for (var i = 0; i < state.guards.length; i++) {
-      var g = state.guards[i];
-      var dx = g.x - state.player.x;
-      var dy = g.y - state.player.y;
-      if (dx * dx + dy * dy < 24 * 24) {
-        state.status = 'lost';
-        window.SC.audio.lose();
-        showOverlay('CAUGHT',
-          'A guard laid a hand on your shoulder in the aisle. The ledger pages scatter — the heist is over.',
-          'Press R to try again. Walk, crouch in the dark nooks, and never run past the Inspector.');
-        return;
-      }
-    }
+  }
+  if (playerAtExit(state.world, state.player)) {
+    state.phase = 'escaped';
+    state.sound.escape();
+  }
+}
+
+function startGame() {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const params = new URLSearchParams(window.location.search);
+  const shot = Number(params.get('shot') || 0);
+  const state = makeGameState();
+  attachInput(state.input);
+
+  if (shot >= 1 && shot <= 4) {
+    // Screenshot mode: pose once, render one fixed frame, signal readiness.
+    stageShot(state, shot);
+    drawScene(ctx, state, 1200);
+    document.title = 'shot-ready';
+    window.__shotReady = true;
+    return;
   }
 
-  function updateHud() {
-    pagesEl.textContent = 'Pages ' + state.player.pages + ' / ' + TOTAL_PAGES;
-    timerEl.textContent = fmtTime(state.time);
-    var worst = 0;
-    for (var i = 0; i < state.guards.length; i++) {
-      worst = Math.max(worst, state.guards[i].suspicion);
-    }
-    maxSuspicion = Math.max(maxSuspicion, worst);
-    fillEl.style.width = Math.round(worst) + '%';
-    if (worst >= 70) fillEl.classList.add('hot');
-    else fillEl.classList.remove('hot');
-    bannerEl.textContent = state.banner;
-    bannerEl.className = state.bannerClass;
-  }
-
-  function tick(dt) {
-    if (state.status !== 'playing') return;
-    state.time += dt;
-    state.player.update(dt, keys, onNoise, function (running) {
-      window.SC.audio.step(running);
-    });
-    var saw = false;
-    for (var i = 0; i < state.guards.length; i++) {
-      var before = state.guards[i].suspicion;
-      state.guards[i].update(dt, state.player, raiseAlarm);
-      if (state.guards[i].suspicion > before && state.guards[i].suspicion > 35 && !saw) {
-        saw = true;
-      }
-    }
-    if (saw && !state.alarm) {
-      state.banner = 'A lantern is turning your way…';
-      state.bannerClass = '';
-      if (maxSuspicion < 35) window.SC.audio.spotted();
-    }
-    if (state.alarm) {
-      state.alarmTime += dt;
-      var anyChase = false;
-      for (var j = 0; j < state.guards.length; j++) {
-        if (state.guards[j].state === 'chase') anyChase = true;
-      }
-      if (!anyChase && state.alarmTime > 6) {
-        state.alarm = false;
-        state.banner = 'You lost them. Breathe — then move.';
-        state.bannerClass = '';
-      }
-    }
-    collectPage();
-    checkWinLose(dt);
-    updateHud();
-  }
-
+  let last = performance.now();
+  let accumulator = 0;
   function frame(now) {
-    if (state.status === 'playing') {
-      var dt = Math.min(0.05, (now - frame.last) / 1000 || 0.016);
-      frame.last = now;
-      tick(dt);
+    const elapsed = Math.min(0.1, (now - last) / 1000);
+    last = now;
+    accumulator += elapsed;
+    while (accumulator >= STEP) {
+      if (state.input.restart && state.phase !== 'play') {
+        const fresh = makeGameState();
+        Object.assign(state, fresh);
+        state.input = fresh.input;
+        attachInput(state.input);
+      }
+      updateGame(state, STEP);
+      accumulator -= STEP;
     }
-    window.SC.render.drawScene(ctx, state, state.time);
+    drawScene(ctx, state, now);
     requestAnimationFrame(frame);
   }
-  frame.last = 0;
+  requestAnimationFrame(frame);
+}
 
-  function reset() {
-    state = newState();
-    keys = {};
-    maxSuspicion = 0;
-    hideOverlay();
-    updateHud();
-  }
-
-  function keyName(e) {
-    return (e.key || '').toLowerCase();
-  }
-
-  window.addEventListener('keydown', function (e) {
-    var k = keyName(e);
-    if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].indexOf(k) >= 0) e.preventDefault();
-    window.SC.audio.unlock();
-    if (k === 'r') { reset(); return; }
-    if (k === 'm') {
-      var muted = window.SC.audio.toggleMute();
-      state.banner = muted ? 'Sound muted.' : 'Sound on.';
-      return;
-    }
-    if (k === 'c' && !e.repeat && state.status === 'playing') {
-      var crouched = state.player.toggleCrouch();
-      state.banner = crouched ? 'Crouched — harder to spot, silent steps.' : 'Standing up. Stay out of the cones.';
-      return;
-    }
-    keys[k] = true;
-  });
-
-  window.addEventListener('keyup', function (e) {
-    keys[keyName(e)] = false;
-  });
-
-  canvas.addEventListener('mousedown', function (e) {
-    window.SC.audio.unlock();
-    if (state.status !== 'playing') return;
-    var rect = canvas.getBoundingClientRect();
-    var x = (e.clientX - rect.left) * (canvas.width / rect.width);
-    var y = (e.clientY - rect.top) * (canvas.height / rect.height);
-    var col = Math.floor(x / L.TILE);
-    var row = Math.floor(y / L.TILE);
-    if (!L.isSolid(col, row)) {
-      var p = L.centerOf(col, row);
-      state.player.clickTarget = { x: p.x, y: p.y };
-    }
-  });
-
-  // Screenshot staging: ?shot=1..4 renders one fixed frame, no loop.
-  if (window.SC.shots.applyShot(state)) {
-    updateHud();
-    window.SC.render.drawScene(ctx, state, state.time);
-    document.title = 'Sleeper Car — shot ' + window.SC.shots.shotFromUrl();
-  } else {
-    updateHud();
-    requestAnimationFrame(frame);
-  }
-})();
+startGame();

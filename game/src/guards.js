@@ -1,205 +1,183 @@
-// Sleeper Car — guards: patrols, lantern vision cones, hearing, suspicion.
-// Two guard kinds: the Conductor (wide short cone, steady patrol) and the
-// Ticket Inspector (long narrow cone, pauses to listen, hears running far).
-(function () {
-  'use strict';
-  var L = window.SC.level;
+// Coin & Candlelight: the guards — patrols, rovers, suspicion, chase, investigate.
+// One file, one job: guard brains. A guard never teleports and never knows
+// where you are unless it saw you or heard you: that is the whole game.
+import {
+  CHASE_SPEED,
+  CONE_HALF_ANGLE,
+  CONE_RANGE_DARK,
+  CONE_RANGE_LIT,
+  CATCH_DISTANCE,
+  GUARD_RADIUS,
+  INVESTIGATE_SPEED,
+  PATROL_SPEED,
+  ROVER_SPEED,
+  SUSPICION_ALARM_DRAIN,
+  SUSPICION_ALARM_LOSE_TIME,
+  SUSPICION_DRAIN,
+  SUSPICION_FILL_BASE,
+  SUSPICION_FILL_CLOSE,
+  SUSPICION_CLOSE_DIST,
+  SUSPICIOUS_THRESHOLD,
+} from './config.js';
+import { angleDifference, angleTo, circleHitsSolid, distance, hasLineOfSight, isLit } from './world.js';
+import { randomPick } from './random.js';
 
-  var CONE_HALF = 0.65; // radians, half-angle of a vision cone
-  var STEP = 8; // raycast sample step in px
-
-  function losBlocked(x0, y0, x1, y1) {
-    var dx = x1 - x0;
-    var dy = y1 - y0;
-    var dist = Math.sqrt(dx * dx + dy * dy);
-    var steps = Math.max(1, Math.ceil(dist / STEP));
-    for (var i = 1; i < steps; i++) {
-      var t = i / steps;
-      var cx = x0 + dx * t;
-      var cy = y0 + dy * t;
-      var col = Math.floor(cx / L.TILE);
-      var row = Math.floor(cy / L.TILE);
-      if (L.isSolid(col, row)) return true;
-    }
-    return false;
-  }
-
-  function angleTo(x0, y0, x1, y1) {
-    return Math.atan2(y1 - y0, x1 - x0);
-  }
-
-  function angleDiff(a, b) {
-    var d = a - b;
-    while (d > Math.PI) d -= Math.PI * 2;
-    while (d < -Math.PI) d += Math.PI * 2;
-    return d;
-  }
-
-  function Guard(kind, waypoints, speed) {
-    this.kind = kind;
-    this.waypoints = waypoints;
-    this.wp = 0;
-    var p0 = L.centerOf(waypoints[0].col, waypoints[0].row);
-    this.x = p0.x;
-    this.y = p0.y;
-    this.dir = 0;
-    this.speed = speed;
-    this.pause = 0;
-    this.state = 'patrol'; // patrol | suspicious | chase | investigate
-    this.stateTime = 0;
-    this.suspicion = 0; // 0..100, shared alarm meter lives on the guard that sees
-    this.lastSeen = null;
-    this.investigateTarget = null;
-    this.mark = null; // '?' or '!' drawn above the head
-    this.markTime = 0;
-    if (kind === 'inspector') {
-      this.coneRange = 265;
-      this.coneHalf = 0.34;
-      this.hearRadius = 340;
-      this.color = '#e07840';
-      this.capColor = '#f5e6c8';
-    } else {
-      this.coneRange = 195;
-      this.coneHalf = CONE_HALF;
-      this.hearRadius = 250;
-      this.color = '#c94f4f';
-      this.capColor = '#2e3d55';
-    }
-  }
-
-  Guard.prototype.setMark = function (mark, seconds) {
-    this.mark = mark;
-    this.markTime = seconds;
+export function makeGuard(spawn, index, random) {
+  const start = spawn.waypoints[0];
+  return {
+    name: spawn.name,
+    kind: spawn.kind,
+    x: start[0],
+    y: start[1],
+    facing: 0,
+    waypoints: spawn.waypoints,
+    waypointIndex: 1,
+    suspicion: 0,
+    state: 'patrol', // patrol | suspicious | alarm | investigate | return
+    lastSeenX: start[0],
+    lastSeenY: start[1],
+    investigateX: start[0],
+    investigateY: start[1],
+    loseSightTimer: 0,
+    investigateTimer: 0,
+    random,
+    index,
   };
+}
 
-  Guard.prototype.canSee = function (player) {
-    var dx = player.x - this.x;
-    var dy = player.y - this.y;
-    var dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist > this.coneRange) return 0;
-    var ang = Math.atan2(dy, dx);
-    if (Math.abs(angleDiff(ang, this.dir)) > this.coneHalf) return 0;
-    if (losBlocked(this.x, this.y, player.x, player.y)) return 0;
-    // Crouching inside a dark luggage nook: invisible, even in the cone.
-    var col = Math.floor(player.x / L.TILE);
-    var row = Math.floor(player.y / L.TILE);
-    if (player.crouched && L.isCoverFloor(col, row)) return 0;
-    var rate = 55; // suspicion points per second at full exposure
-    if (!L.lightAt(player.x, player.y)) rate *= 0.55; // shadow slows the eye
-    if (player.crouched) rate *= 0.6;
-    if (L.isCoverFloor(col, row)) rate *= 0.25; // half-hidden behind the nook
-    if (dist < 70) rate *= 1.6; // nose to nose: no hiding
-    return rate;
-  };
+function guardSeesPlayer(world, guard, player) {
+  const dist = distance(guard.x, guard.y, player.x, player.y);
+  const range = isLit(world, player.x, player.y) ? CONE_RANGE_LIT : CONE_RANGE_DARK;
+  if (dist > range) return { sees: false, dist };
+  const toPlayer = angleTo(guard.x, guard.y, player.x, player.y);
+  if (Math.abs(angleDifference(toPlayer, guard.facing)) > CONE_HALF_ANGLE) return { sees: false, dist };
+  if (!hasLineOfSight(world, guard.x, guard.y, player.x, player.y)) return { sees: false, dist };
+  return { sees: true, dist };
+}
 
-  Guard.prototype.hearNoise = function (nx, ny) {
-    var dx = nx - this.x;
-    var dy = ny - this.y;
-    if (dx * dx + dy * dy > this.hearRadius * this.hearRadius) return false;
-    if (this.state === 'chase') return false;
-    this.investigateTarget = { x: nx, y: ny };
-    this.state = 'investigate';
-    this.stateTime = 0;
-    this.setMark('?', 1.6);
-    return true;
-  };
+function suspicionRises(guard, player, seen, dt) {
+  if (!seen.sees) return;
+  const close = seen.dist < SUSPICION_CLOSE_DIST;
+  const rate = close ? SUSPICION_FILL_CLOSE : SUSPICION_FILL_BASE;
+  guard.suspicion = Math.min(1, guard.suspicion + rate * dt);
+  guard.lastSeenX = player.x;
+  guard.lastSeenY = player.y;
+  guard.loseSightTimer = 0;
+}
 
-  Guard.prototype.moveToward = function (tx, ty, dt, speed) {
-    var dx = tx - this.x;
-    var dy = ty - this.y;
-    var dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist < 2) return true;
-    var step = Math.min(dist, speed * dt);
-    var nx = this.x + (dx / dist) * step;
-    var ny = this.y + (dy / dist) * step;
-    if (!hitsSolid(nx, this.y)) this.x = nx;
-    if (!hitsSolid(this.x, ny)) this.y = ny;
-    this.dir = Math.atan2(dy, dx);
-    return dist - step < 2;
-  };
+function suspicionFalls(guard, dt) {
+  const rate = guard.state === 'alarm' ? SUSPICION_ALARM_DRAIN : SUSPICION_DRAIN;
+  guard.suspicion = Math.max(0, guard.suspicion - rate * dt);
+}
 
-  function hitsSolid(px, py) {
-    var r = 13;
-    var pts = [
-      [px - r, py - r], [px + r, py - r],
-      [px - r, py + r], [px + r, py + r]
-    ];
-    for (var i = 0; i < pts.length; i++) {
-      if (L.isSolid(Math.floor(pts[i][0] / L.TILE), Math.floor(pts[i][1] / L.TILE))) return true;
-    }
-    return false;
-  }
+function moveToward(world, guard, targetX, targetY, speed, dt) {
+  const dist = distance(guard.x, guard.y, targetX, targetY);
+  if (dist < 1) return true;
+  const step = Math.min(dist, speed * dt);
+  const nx = guard.x + ((targetX - guard.x) / dist) * step;
+  const ny = guard.y + ((targetY - guard.y) / dist) * step;
+  guard.facing = angleTo(guard.x, guard.y, targetX, targetY);
+  if (!circleHitsSolid(world, nx, guard.y, GUARD_RADIUS)) guard.x = nx;
+  if (!circleHitsSolid(world, guard.x, ny, GUARD_RADIUS)) guard.y = ny;
+  return distance(guard.x, guard.y, targetX, targetY) < 6;
+}
 
-  Guard.prototype.update = function (dt, player, alarm) {
-    this.stateTime += dt;
-    if (this.markTime > 0) {
-      this.markTime -= dt;
-      if (this.markTime <= 0) this.mark = null;
-    }
-    var seen = this.canSee(player);
-    if (seen > 0) {
-      this.suspicion = Math.min(100, this.suspicion + seen * dt);
-      this.lastSeen = { x: player.x, y: player.y };
-      if (this.suspicion > 35) this.setMark('?', 0.5);
-      if (this.suspicion >= 100 && this.state !== 'chase') {
-        this.state = 'chase';
-        this.stateTime = 0;
-        this.setMark('!', 2.5);
-        alarm(this);
+function patrolStep(world, guard, dt) {
+  const target = guard.waypoints[guard.waypointIndex];
+  const arrived = moveToward(world, guard, target[0], target[1], guard.kind === 'rover' ? ROVER_SPEED : PATROL_SPEED, dt);
+  if (arrived) {
+    if (guard.kind === 'rover') {
+      guard.waypointIndex = Math.floor(guard.random() * guard.waypoints.length);
+      if (guard.waypoints[guard.waypointIndex][0] === guard.x && guard.waypoints[guard.waypointIndex][1] === guard.y) {
+        guard.waypointIndex = (guard.waypointIndex + 1) % guard.waypoints.length;
       }
     } else {
-      this.suspicion = Math.max(0, this.suspicion - 22 * dt);
+      guard.waypointIndex = (guard.waypointIndex + 1) % guard.waypoints.length;
     }
+  }
+}
 
-    if (this.state === 'chase') {
-      var target = this.lastSeen || { x: player.x, y: player.y };
-      this.moveToward(target.x, target.y, dt, 150);
-      if (this.stateTime > 6) {
-        this.state = 'patrol';
-        this.stateTime = 0;
-        this.suspicion = 40;
-      }
-      return;
-    }
-    if (this.state === 'investigate' && this.investigateTarget) {
-      var arrived = this.moveToward(this.investigateTarget.x, this.investigateTarget.y, dt, this.speed * 1.6);
-      if (arrived || this.stateTime > 7) {
-        this.state = 'patrol';
-        this.stateTime = 0;
-        this.investigateTarget = null;
-        this.pause = 1.2; // look around, then resume the round
-      }
-      return;
-    }
-    if (this.pause > 0) {
-      this.pause -= dt;
-      this.dir += dt * 0.9; // slow scan while paused
-      return;
-    }
-    var wp = this.waypoints[this.wp];
-    var dest = L.centerOf(wp.col, wp.row);
-    var reached = this.moveToward(dest.x, dest.y, dt, this.speed);
-    if (reached) {
-      this.wp = (this.wp + 1) % this.waypoints.length;
-      // The inspector stops at each end of the aisle to listen.
-      this.pause = this.kind === 'inspector' ? 1.6 : 0.5;
-    }
-  };
+function investigateNoise(guard, x, y) {
+  // Only a calm guard turns to a noise; an alarmed guard keeps its prey.
+  if (guard.state === 'alarm') return;
+  guard.state = 'investigate';
+  guard.investigateX = x;
+  guard.investigateY = y;
+  guard.investigateTimer = 3;
+}
 
-  function buildGuards() {
-    return [
-      new Guard('conductor', L.PATROLS.conductorA, 55),
-      new Guard('conductor', L.PATROLS.conductorB, 55),
-      new Guard('conductor', L.PATROLS.conductorC, 50),
-      new Guard('inspector', L.PATROLS.inspector, 68)
-    ];
+export function guardHearsNoise(guard, x, y, radius) {
+  if (distance(guard.x, guard.y, x, y) > radius) return;
+  investigateNoise(guard, x, y);
+}
+
+// One fixed step of guard logic. Returns 'caught' when this guard touches
+// the player while alarmed, otherwise null.
+export function updateGuard(world, guard, player, dt) {
+  const seen = guardSeesPlayer(world, guard, player);
+  if (seen.sees) {
+    suspicionRises(guard, player, seen, dt);
+  } else {
+    suspicionFalls(guard, dt);
+    guard.loseSightTimer += dt;
   }
 
-  window.SC.guards = {
-    Guard: Guard,
-    buildGuards: buildGuards,
-    losBlocked: losBlocked,
-    angleDiff: angleDiff,
-    angleTo: angleTo
-  };
-})();
+  if (guard.suspicion >= 1) {
+    guard.state = 'alarm';
+  } else if (guard.suspicion >= SUSPICIOUS_THRESHOLD && guard.state === 'patrol') {
+    guard.state = 'suspicious';
+  } else if (guard.suspicion < SUSPICIOUS_THRESHOLD && guard.state === 'suspicious') {
+    guard.state = 'patrol';
+  }
+
+  if (guard.state === 'alarm') {
+    if (seen.sees) {
+      guard.lastSeenX = player.x;
+      guard.lastSeenY = player.y;
+      guard.loseSightTimer = 0;
+    }
+    moveToward(world, guard, guard.lastSeenX, guard.lastSeenY, CHASE_SPEED, dt);
+    if (distance(guard.x, guard.y, player.x, player.y) < CATCH_DISTANCE && seen.sees) {
+      return 'caught';
+    }
+    if (guard.loseSightTimer > SUSPICION_ALARM_LOSE_TIME) {
+      guard.state = 'patrol';
+      guard.suspicion = SUSPICIOUS_THRESHOLD;
+    }
+    return null;
+  }
+
+  if (guard.state === 'investigate') {
+    const arrived = moveToward(world, guard, guard.investigateX, guard.investigateY, INVESTIGATE_SPEED, dt);
+    guard.investigateTimer -= dt;
+    if (arrived || guard.investigateTimer <= 0) {
+      // Look around, then walk back to the patrol route.
+      guard.facing += dt * 1.5;
+      if (guard.investigateTimer <= -1.2) guard.state = 'patrol';
+    }
+    return null;
+  }
+
+  if (guard.state === 'suspicious') {
+    // Walk toward where the player was last seen, but slowly: the player
+    // still has a chance to break away. That chance is criterion 2.
+    moveToward(world, guard, guard.lastSeenX, guard.lastSeenY, PATROL_SPEED * 1.25, dt);
+    return null;
+  }
+
+  patrolStep(world, guard, dt);
+  return null;
+}
+
+export function guardConeColor(guard) {
+  if (guard.state === 'alarm') return 'alert';
+  if (guard.state === 'suspicious' || guard.state === 'investigate') return 'warm';
+  return guard.kind === 'rover' ? 'rover' : 'patrol';
+}
+
+// A guard's current vision range (light makes you easier to spot).
+export function guardVisionRange(world, guard, player) {
+  return isLit(world, player.x, player.y) ? CONE_RANGE_LIT : CONE_RANGE_DARK;
+}
+
+export { randomPick };
