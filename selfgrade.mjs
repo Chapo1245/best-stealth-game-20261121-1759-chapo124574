@@ -27,6 +27,22 @@ check('seeded random deterministic', r1() === r2() && r1() === r2(), true);
 // (y=432 is the door gap through the separator, so it stays open;
 // y=200 crosses solid wall.)
 const world = buildWorld();
+
+// Every treasure must be reachable: standing next to it (within pickup
+// range) from at least one direction, on open floor. A treasure inside a
+// solid case is a game nobody can win — this check exists because the
+// Ember Opal once sat inside the vault safe.
+for (const item of world.loot) {
+  let reachable = false;
+  for (let step = 0; step < 8; step++) {
+    const angle = (step / 8) * Math.PI * 2;
+    const px = item.x + Math.cos(angle) * 24;
+    const py = item.y + Math.sin(angle) * 24;
+    if (!circleHitsSolid(world, px, py, 11)) reachable = true;
+  }
+  check(`loot reachable: ${item.name}`, reachable, true);
+  check(`loot not inside solid: ${item.name}`, circleHitsSolid(world, item.x, item.y, 0), false);
+}
 check('los clear', hasLineOfSight(world, 100, 432, 250, 432), true);
 check('los clear through door gap', hasLineOfSight(world, 100, 432, 400, 432), true);
 check('los blocked by wall', hasLineOfSight(world, 100, 200, 400, 200), false);

@@ -79,7 +79,7 @@ function buildLoot() {
   return [
     { id: 'locket', name: 'Silver Locket', x: 500, y: 200, taken: false },
     { id: 'figurine', name: 'Jade Figurine', x: 884, y: 652, taken: false },
-    { id: 'opal', name: 'Ember Opal', x: 1166, y: 186, taken: false },
+    { id: 'opal', name: 'Ember Opal', x: 1150, y: 280, taken: false },
   ];
 }
 
